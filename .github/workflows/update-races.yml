@@ -5,29 +5,31 @@ on:
     - cron: '0 8 * * *'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   update:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v3
-
-      - name: Setup Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
-
-      - name: Install requests
-        run: pip install requests
+      - name: Clone repo
+        run: git clone https://github.com/${{ github.repository }}.git repo
 
       - name: Run updater
-        run: python scripts/update_races.py
+        run: |
+          cd repo
+          python3 --version
+          python3 -m pip install requests
+          python3 scripts/update_races.py
 
       - name: Commit updated data
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          cd repo
           git config user.name "github-actions"
           git config user.email "actions@github.com"
           git add data/upcoming_races.json
           git commit -m "Update race data" || echo "No changes"
-          git push
+          git push https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git HEAD:main
