@@ -1,177 +1,108 @@
 import json
 import re
 import requests
-from collections import defaultdict
 
-URLS = [
-    "https://www.sportinglife.com/racing/abc-guide/today",
-    "https://www.sportinglife.com/racing/abc-guide/tomorrow",
-    "https://www.sportinglife.com/racing/abc-guide/5-days",
+URL = "https://www.sportinglife.com/racing/racecards"
+HEADERS = {"User-Agent": "Mozilla/5.0"}
+
+MEETINGS = [
+    "Doncaster", "Kempton", "Stratford", "Uttoxeter", "Southwell",
+    "Curragh", "Meydan", "Gulfstream", "Auteuil", "Laval", "Nancy",
+    "Aqueduct", "Charles Town", "Laurel Park", "Oaklawn Park",
+    "Sam Houston Race Park", "Santa Anita", "Tampa Bay Downs",
+    "Turfway Park", "Will Rogers Downs"
 ]
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0"
-}
+def clean(text):
+    text = re.sub(r"<[^>]+>", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
 
-SKIP_LINES = {
-    "ABC Guide",
-    "Today",
-    "Tomorrow",
-    "5 Days",
-    "Declared Runners",
-    "Jockey Rides",
-    "Trainer Entries",
-    "Horse Race Day Odds",
-    "My Stable",
-}
+def parse_main_racecards(text):
+    lines = [clean(x) for x in text.splitlines()]
+    lines = [x for x in lines if x]
 
-DAY_NAMES = {
-    "Monday", "Tuesday", "Wednesday", "Thursday",
-    "Friday", "Saturday", "Sunday"
-}
-
-
-def fractional_to_decimal(frac):
-    try:
-        num, den = frac.split("/")
-        return (float(num) / float(den)) + 1.0
-    except Exception:
-        return None
-
-
-def clean_line(line):
-    line = re.sub(r"<[^>]+>", "", line)
-    line = re.sub(r"\s+", " ", line).strip()
-    return line
-
-
-def extract_entry_line(line):
-    match = re.match(
-        r"^(\d{1,2}:\d{2})\s+(.+?)\s+"
-        r"(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\s+"
-        r"(\d+/\d+)$",
-        line
-    )
-    if not match:
-        return None
-
-    return {
-        "time": match.group(1).strip(),
-        "course": match.group(2).strip(),
-        "day": match.group(3).strip(),
-        "odds": match.group(4).strip(),
-    }
-
-
-def parse_html_entries(html):
-    lines = [clean_line(line) for line in html.splitlines()]
-    lines = [line for line in lines if line]
-
-    entries = []
-
+    meetings = []
     i = 0
+
     while i < len(lines):
-        horse = lines[i]
+        line = lines[i]
 
-        if horse in SKIP_LINES:
-            i += 1
+        if line in MEETINGS:
+            meeting = {
+                "meeting": line,
+                "going": "",
+                "surface": "",
+                "races": []
+            }
+
+            j = i + 1
+
+            while j < len(lines):
+                current = lines[j]
+
+                if j > i + 1 and current in MEETINGS:
+                    break
+
+                if current.startswith("Going:"):
+                    meeting["going"] = current.replace("Going:", "").strip()
+
+                elif current.startswith("Surface:"):
+                    meeting["surface"] = current.replace("Surface:", "").strip()
+
+                elif re.match(r"^\d{1,2}:\d{2}$", current):
+                    if j + 1 < len(lines):
+                        title = lines[j + 1]
+                        meta = lines[j + 2] if j + 2 < len(lines) else ""
+
+                        age_band = ""
+                        runner_count = None
+                        race_class = ""
+                        distance = ""
+
+                        parts = [p.strip() for p in meta.split("|")]
+
+                        for part in parts:
+                            if "Runners" in part:
+                                m = re.search(r"(\d+)\s+Runners", part)
+                                if m:
+                                    runner_count = int(m.group(1))
+                            elif "Class" in part:
+                                race_class = part
+                            elif re.search(r"\d+[fm]", part):
+                                distance = part
+                            elif "YO" in part or "plus" in part:
+                                age_band = part
+
+                        meeting["races"].append({
+                            "time": current,
+                            "title": title,
+                            "age_band": age_band,
+                            "runner_count": runner_count,
+                            "class": race_class,
+                            "distance": distance
+                        })
+
+                j += 1
+
+            meetings.append(meeting)
+            i = j
             continue
-
-        if re.match(r"^\d{1,2}:\d{2}\s+", horse):
-            i += 1
-            continue
-
-        if horse in DAY_NAMES:
-            i += 1
-            continue
-
-        if re.match(r"^\d+/\d+$", horse):
-            i += 1
-            continue
-
-        if i + 2 < len(lines) and lines[i + 1] == "My Stable":
-            parsed = extract_entry_line(lines[i + 2])
-            if parsed:
-                entries.append({
-                    "horse": horse,
-                    "race": f"{parsed['time']} {parsed['course']}",
-                    "day": parsed["day"],
-                    "odds": parsed["odds"],
-                })
-                i += 3
-                continue
 
         i += 1
 
-    return entries
-
-
-def build_races(entries):
-    races = defaultdict(list)
-
-    for item in entries:
-        try:
-            time_part, course = item["race"].split(" ", 1)
-        except ValueError:
-            continue
-
-        dec = fractional_to_decimal(item["odds"])
-        if not dec:
-            continue
-
-        prob = 1 / dec
-        key = f'{item["day"]}_{time_part}_{course}'
-
-        races[key].append({
-            "horse": item["horse"],
-            "odds": item["odds"],
-            "decimal_odds": dec,
-            "implied_prob": prob
-        })
-
-    output = []
-
-    for key, runners in races.items():
-        day, time_part, course = key.split("_", 2)
-        total_prob = sum(r["implied_prob"] for r in runners)
-
-        if total_prob > 0:
-            for runner in runners:
-                runner["implied_prob"] = runner["implied_prob"] / total_prob
-
-        runners.sort(key=lambda x: x["implied_prob"], reverse=True)
-
-        output.append({
-            "day": day,
-            "time": time_part,
-            "course": course,
-            "runners": runners
-        })
-
-    output.sort(key=lambda x: (x["day"], x["time"], x["course"]))
-    return output
-
+    return meetings
 
 def main():
-    all_entries = []
+    response = requests.get(URL, headers=HEADERS, timeout=30)
+    response.raise_for_status()
 
-    for url in URLS:
-        try:
-            response = requests.get(url, headers=HEADERS, timeout=30)
-            response.raise_for_status()
-            entries = parse_html_entries(response.text)
-            print(f"{url} -> {len(entries)} entries")
-            all_entries.extend(entries)
-        except Exception as exc:
-            print(f"Failed to fetch {url}: {exc}")
-
-    races = build_races(all_entries)
+    meetings = parse_main_racecards(response.text)
 
     with open("data/upcoming_races.json", "w", encoding="utf-8") as f:
-        json.dump(races, f, indent=2, ensure_ascii=False)
+        json.dump(meetings, f, indent=2, ensure_ascii=False)
 
-    print(f"Wrote {len(races)} races")
-
+    print(f"Wrote {len(meetings)} meetings")
 
 if __name__ == "__main__":
     main()
